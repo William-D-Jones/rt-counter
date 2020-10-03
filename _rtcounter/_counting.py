@@ -52,12 +52,27 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
+    exonsTerm=ht.GenomicArrayOfSets("auto",stranded=False)
+    exonsLatest={} # Holds the most 3' exon of each feature so far
     strands={}
     for feature in ff:
         if feature.type=="exon":
             exons[feature.iv]+=feature.name
             if feature.name not in strands.keys():
-                strands[feature.name]=
+                strands[feature.name]=feature.iv.strand
+            if (feature.name not in exonsLatest.keys()) or \
+                    (exonsLatest[feature.name].attr["exon_number"]<\
+                    feature.attr["exon_number"]) or \
+                    ((exonsLatest[feature.name].attr["exon_number"]==\
+                    feature.attr["exon_number"]) and \
+                    ((feature.iv.strand=="-" and feature.iv.end<exonsLatest[feature.name].iv.strand
+
+
+    test_key=list(strands.keys())[0:10]
+    test_val=[strands[i] for i in test_key]
+    print(test_key)
+    print(test_val)
+
 
 
 
