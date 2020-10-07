@@ -1,4 +1,5 @@
 import HTSeq as ht
+import collections as co
 
 # Parser choices
 MODE_CNTALL="count_all"
@@ -6,19 +7,34 @@ MODE_CNTNON="count_none"
 MODE_CNTFRA="count_fractional"
 COUNTMODES=[MODE_CNTALL,MODE_CNTNON,MODE_CNTFRA]
 
+# CIGAR data
+MOPS=set("M","=","X") # CIGAR operations interpreted as matches
+SOPS=set("N") # CIGAR operations interpreted as skips
+
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
         countMultimappers,countOverlappers):
     """
-    Counts reads from a BAM file using the following procedure:
-    1. If a template contains at least fAnchor nucleotides anywhere within a
-    feature, we count the template toward the feature's 'base' transcript.
-    2. For each match in (1), if the template matches at least fAnchor
-    nucleotides counting back from the 3' end of the feature, we count the
-    template toward the feature's 'end' transcript.
-    3. For each match in (2), if the template also matches at least the first
-    fAnchor nucleotides counting forward from the 3' end of the feature (that
-    is, the genomic DNA downstream of the feature), we count the template
-    toward the feature's 'readthrough' transcript.
+    Counts paired-end reads from a BAM file using the following procedure:
+    1. A template counts toward a feature's 'base' transcript if:
+        a. At least one segment in the template has at least fAnchor CIGAR
+           match operations on its 3' end, uninterrupted by any skip (N)
+           operations, that matches a feature F.
+        b. No nucleotides in either segment of the template match any features
+           other than F.
+        c. The other segment in the template has at least fAnchor CIGAR match
+           operations on its 3' end uninterrupted by any skip (N) operations,
+           that may or may not match F.
+        d. The genomic interval between the most 3' non-N operation of the
+           first segment and the most 3' non-N operation of the segment segment
+           contains no features other than F.
+    2. A template counts toward a feature's 'end' transcript if:
+        a. It counts toward the feature's 'base' transcript.
+        b. The genomic interval specified in (1d) contains fAnchor of the most
+           3' nucleotides of the most 3' exon in F.
+    3. A template counts toward a feature's 'readthrough' transcript if:
+        a. It counts toward the feature's 'end' transcript.
+        b. The genomic interval specified in (1d) contains rtAnchor of the
+           nucleotides immediately following the most 3' exon in F.
 
     The counting procedure is performed at the exon level. Therefore, if 
     multiple transcripts are produced from the same genomic feature, only
@@ -52,7 +68,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
-    exonsLatest={} # Holds the most 3' exon of each feature so far
+    exonsLatest={} # Holds the most 3' exon of each feature.name so far
     strands={}
     for feature in ff:
         if feature.type=="exon":
@@ -69,6 +85,100 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     for key in exonsLatest.keys():
         feature=exonsLatest[key]
         exonsTerm[feature.iv]+=feature.name
+
+    cntBase=co.Counter()
+    cntEnd=co.Counter()
+    cntRt=co.Counter()
+    
+    aa=ht.SAM_Reader(pathToBAM)
+    for alns in ht.pair_SAM_alignments(aa,bundle=True):
+
+        weightMultimappers=0
+        unmapped=False
+
+        # Determine if the template is a multimapper, and assign weight
+        if len(alns)>1:
+            if countMultimappers==MODE_CNTALL:
+                weightMultimappers=1
+            elif countMultimappers==MODE_CNTFRA:
+                weightMultimappers=1/len(bundle)
+            elif countMultimappers==MODE_CNTNON:
+                cntBase["_multimapper"]+=1
+                continue
+            else:
+                raise ValueError("Unknown choice for countMultimappers mode.")
+        else:
+            weightMultimappers=1
+
+        for segs in alns:
+
+            weightOverlappers=0
+
+            # Check that the alignment is paired
+            if None in segs:
+                cntBase["_orphan_alignment"]+=weightMultimappers
+                continue
+
+            # Check that all segments are mapped
+            for seg in segs:
+                if not seg.aligned:
+                    unmapped=True
+                    break
+            if unmapped:
+                unmapped=False
+                cntBase["_unmapped"]+=weightMultimappers
+                continue
+
+            # Check for a match to a feature
+            id_all=[]
+            id_match=[]
+            len_match=[]
+            isMatch=False
+            for i in range(len(segs)):
+                len_match.append(0)
+                id_all.append(set())
+                id_match.append(seg())
+                cigar=seg.cigar
+                inMatchReg=True
+                for j in reversed(range(len(cigar))):
+                    if cigar[j].type not in MOPS:
+                        if cigar[j].type in SOPS:
+                            inMatchReg=False
+                        continue
+                    for iv,ff in exons[cigar[j].ref_iv].steps():
+                        id_all[i] |= ff
+                        if inMatchReg:
+                            id_match[i] |= ff
+                            len_match[i]+=cigar[j].size
+                if len_match[i]<fAnchor:
+
+                
+
+                
+
+
+
+
+
+
+
+
+            idBase=set()
+
+
+
+
+
+
+
+
+            
+
+
+
+
+
+
     
     
 
