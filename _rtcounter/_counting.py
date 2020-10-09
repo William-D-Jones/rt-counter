@@ -129,17 +129,28 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                 cntBase["_unmapped"]+=weightMultimappers
                 continue
 
-            # Check for a match to a feature
-            id_all=[]
-            id_match=[]
-            len_match=[]
-            isMatch=False
+            # Identify base transcripts to which the templates matches
+
+            # First, identify candidate matches
+
+            # The 'match region' is the portion of the CIGAR that must contain
+            # a match, that is, the longest possible continuous portion of the
+            # CIGAR containing the most 3' match operation (M, =, or X) but not
+            # containing any skips (N)
+
+            id_all=[] # List of ID sets matching each segment
+            id_match=[] # List of ID sets matching each segment in match region
+            len_match_any=[] # Length of match region in each segment
+            len_match_feat=[] # Length of match region matching a feature
             for i in range(len(segs)):
+
                 len_match.append(0)
                 id_all.append(set())
-                id_match.append(seg())
+                id_match.append(set())
+
                 cigar=seg.cigar
-                inMatchReg=True
+                inMatchReg=True # Tracks if we have encountered an N
+
                 for j in reversed(range(len(cigar))):
                     if cigar[j].type not in MOPS:
                         if cigar[j].type in SOPS:
@@ -149,8 +160,17 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                         id_all[i] |= ff
                         if inMatchReg:
                             id_match[i] |= ff
-                            len_match[i]+=cigar[j].size
-                if len_match[i]<fAnchor:
+                            len_match_any[i]+=cigar[j].size
+                            if len(ff)>0:
+                                len_match_feat[i]+=cigar[j].size
+
+            # Second, decide if any of the candidate matches constitutes a
+            # match to the corresponding 'base' transcript
+
+
+
+            
+
 
                 
 
