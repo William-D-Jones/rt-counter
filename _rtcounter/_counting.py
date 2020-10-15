@@ -133,10 +133,10 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
             # First, identify candidate matches
 
-            # The 'match region' is the portion of the CIGAR that must contain
-            # a match, that is, the longest possible continuous portion of the
-            # CIGAR containing the most 3' match operation (M, =, or X) but not
-            # containing any skips (N)
+            # The 'match region' is the portion of the CIGAR that we require to 
+            # contain a match, that is, the longest possible continuous portion 
+            # of the CIGAR containing the CIGAR's rightmost match operation 
+            # (M, =, or X) but not containing any skips (N)
 
             id_all=[] # List of ID sets matching each segment
             id_match=[] # List of ID sets matching each segment in match region
@@ -167,40 +167,20 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             # Second, decide if any of the candidate matches constitutes a
             # match to the corresponding 'base' transcript
 
+            ids=set()
+            isLenPassAny=True
+            isLenPassFeat=False
+            for i in len(id_all):
+                ids |= id_all[i]
+                if len_match_feat[i]>=fAnchor:
+                    isLenPassFeat=True
+                if len_match_any[i]<fAnchor:
+                    isLenPassAny=False
+            if not isLenPassFeat:
+                continue
+            if not isLenPassAny:
+                continue
+            cntBase[list(id_all)[0]]+=1
 
 
             
-
-
-                
-
-                
-
-
-
-
-
-
-
-
-            idBase=set()
-
-
-
-
-
-
-
-
-            
-
-
-
-
-
-
-    
-    
-
-
-
