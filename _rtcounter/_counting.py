@@ -183,4 +183,25 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             cntBase[list(id_all)[0]]+=1
 
 
-            
+def writeBAMwithOpts(writer,aln,opts):
+    """
+    Writes a BAM alignment with the HTSeq BAM writer, adding optional fields.
+    writer: an HTSeq BAM writer
+    aln: an HTSeq SAM alignment
+    opts: a list of optional fields in the format [[TAG,TYPE,VALUE],...]
+        The TAG and TYPE elements must be strings. If the VALUE element is
+        not a string already, it will be converted to a string.
+    """
+
+    # Convert VALUE to string if needed
+    for i in range(len(opts)):
+        opts[i][2]=str(opts[i][2])
+
+    # Construct the SAM alignment with new optional fields
+    line=aln.get_sam_line()
+    for opt in opts:
+        line="\t".join([line,":".join(opt)])
+    aln_new=ht.SAM_Alignment(line)
+
+    # Write the line
+    writer.write(aln_new)
