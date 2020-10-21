@@ -41,17 +41,16 @@ paMain.add_argument("-r","--readthroughAnchor",type=int,help="".join(["Number \
         of bases in reads that must match the genomic sequence immediately 3' \
         to each feature. Defaults to ",str(D_RTANCHOR),"."]),
         default=D_RTANCHOR,metavar="NUMBER_BASES")
-paMain.add_argument("-cm","--countMultimappers",
+paMain.add_argument("-cmm","--countMultimappers",
         choices=rt._counting.COUNTMODES,
         help="".join(["Mode for counting reads that have multiple \
         alignments. Choose from [",COUNTMODES_DISP,"]. ",
         "Defaults to ",str(D_COUNTMODE),"."]),default=D_COUNTMODE,
         metavar="MODE_CHOICE")
-paMain.add_argument("-co","--countOverlappers",choices=rt._counting.COUNTMODES,
-        help="".join(["Mode for counting alignments that overlap multiple \
-        features. Choose from [",COUNTMODES_DISP,"]. ",
-        "Defaults to ",str(D_COUNTMODE),"."]),default=D_COUNTMODE,
-        metavar="MODE_CHOICE")
+paMain.add_argument("-cff","--countMultifeature",
+        help="Turns on the option to count alignments for which the paired \
+        segments overlap multiple features. Off by default.",
+        action="store_true")
 paNames=paMain.parse_args()
 
 dfResult=rt._counting._calc_rt(
@@ -62,5 +61,5 @@ dfResult=rt._counting._calc_rt(
         fAnchor=paNames.featureAnchor,
         rtAnchor=paNames.readthroughAnchor,
         countMultimappers=paNames.countMultimappers,
-        countOverlappers=paNames.countOverlappers)
+        countMultifeature=paNames.countMultifeature)
 

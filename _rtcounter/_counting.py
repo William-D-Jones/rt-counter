@@ -8,11 +8,15 @@ MODE_CNTFRA="count_fractional"
 COUNTMODES=[MODE_CNTALL,MODE_CNTNON,MODE_CNTFRA]
 
 # CIGAR data
-MOPS=set("M","=","X") # CIGAR operations interpreted as matches
-SOPS=set("N") # CIGAR operations interpreted as skips
+MOPS=set(["M","=","X"]) # CIGAR operations interpreted as matches
+SOPS=set(["N"]) # CIGAR operations interpreted as skips
+
+# Miscellaneous constants
+ERROR_CODES={"ORPHAN":"1","FAILCHECKS":"2","NOMATCH":3,"NOFEAT":4,
+        "MULTIMAP":5,"MULTIFEAT":6,"MULTIFEAT_INT":7}
 
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
-        countMultimappers,countOverlappers):
+        countMultimappers,countMultifeature):
     """
     Counts paired-end reads from a BAM file using the following procedure:
     1. A template counts toward a feature's 'base' transcript if:
@@ -64,6 +68,11 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     3. en:i:TAIL_LENGTH_END (or -1 if not an end match)
     4. rt:i:TAIL_LENGTH_READTHROUGH (or -1 if not a readthrough match)
     5. cw:i:1/COUNTING_WEIGHT
+
+    Finally, if pathToFails is specified, all nonmatching reads are written
+    to this path and file. Alignments are written in SAM format (no header
+    lines) with 1 added optional field:
+    1. xx:i:ERROR_CODE
     """
 
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
@@ -91,10 +100,14 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     cntRt=co.Counter()
     
     aa=ht.SAM_Reader(pathToBAM)
+    if pathToHits is not None:
+        w_hits=ht.BAM_Writer(pathToHits)
+    if pathToFails is not None:
+        w_fails=ht.BAM_Writer(pathToFails)
     for alns in ht.pair_SAM_alignments(aa,bundle=True):
 
         weightMultimappers=0
-        unmapped=False
+        failchecks=False
 
         # Determine if the template is a multimapper, and assign weight
         if len(alns)>1:
@@ -104,6 +117,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                 weightMultimappers=1/len(bundle)
             elif countMultimappers==MODE_CNTNON:
                 cntBase["_multimapper"]+=1
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["MULTIMAP"]]])
                 continue
             else:
                 raise ValueError("Unknown choice for countMultimappers mode.")
@@ -117,16 +132,22 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             # Check that the alignment is paired
             if None in segs:
                 cntBase["_orphan_alignment"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["ORPHAN"]]])
                 continue
 
             # Check that all segments are mapped
             for seg in segs:
-                if not seg.aligned:
-                    unmapped=True
+                if ((not seg.aligned) or \
+                        seg.failed_platform_qc or \
+                        seg.pcr_or_optical_duplicate):
+                    failchecks=True
                     break
-            if unmapped:
-                unmapped=False
-                cntBase["_unmapped"]+=weightMultimappers
+            if failchecks:
+                failchecks=False
+                cntBase["_fail_checks"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
                 continue
 
             # Identify base transcripts to which the templates matches
@@ -170,38 +191,68 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             ids=set()
             isLenPassAny=True
             isLenPassFeat=False
-            for i in len(id_all):
-                ids |= id_all[i]
+            for i in range(len(id_all)):
+                if countMultifeature:
+                    ids |= id_match[i]
+                else:
+                    ids |= id_all[i]
                 if len_match_feat[i]>=fAnchor:
                     isLenPassFeat=True
                 if len_match_any[i]<fAnchor:
                     isLenPassAny=False
-            if not isLenPassFeat:
-                continue
             if not isLenPassAny:
+                cntBase["_insufficient_match"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["NOMATCH"]]])
                 continue
-            cntBase[list(id_all)[0]]+=1
+            if not isLenPassFeat:
+                cntBase["_no_feature"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["NOFEAT"]]])
+                continue
+            if len(ids)>0:
+                cntBase["_multifeature"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,alns,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
+                continue
+            
+            # Still need to construct the genomic interval 
+            # spanned by the template
+            # To find out if the final condition is fulfilled
 
 
-def writeBAMwithOpts(writer,aln,opts):
+            # Record the match to the base transcript
+            writeBAMwithOpts(w_hits,alns,[["fe","Z",list(ids)[0]]])
+            cntBase[list(ids)[0]]+=1
+
+    aa.close()
+    if pathToHits is not None:
+        w_hits.close()
+    if pathToFails is not None:
+        w_fails.close()
+
+
+def writeBAMwithOpts(writer,alns,opts):
     """
     Writes a BAM alignment with the HTSeq BAM writer, adding optional fields.
     writer: an HTSeq BAM writer
-    aln: an HTSeq SAM alignment
+    alns: an iterable of HTSeq SAM alignments
     opts: a list of optional fields in the format [[TAG,TYPE,VALUE],...]
         The TAG and TYPE elements must be strings. If the VALUE element is
         not a string already, it will be converted to a string.
     """
 
-    # Convert VALUE to string if needed
+    # Convert optional field VALUE to string if needed
     for i in range(len(opts)):
         opts[i][2]=str(opts[i][2])
 
-    # Construct the SAM alignment with new optional fields
-    line=aln.get_sam_line()
-    for opt in opts:
-        line="\t".join([line,":".join(opt)])
-    aln_new=ht.SAM_Alignment(line)
+    for aln in alns:
 
-    # Write the line
-    writer.write(aln_new)
+        # Construct the SAM alignment with new optional fields
+        line=aln.get_sam_line()
+        for opt in opts:
+            line="\t".join([line,":".join(opt)])
+        aln_new=ht.SAM_Alignment(line)
+
+        # Write the line
+        writer.write(aln_new)
