@@ -61,8 +61,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     updated April 30, 2020 from the SAM/BAM Format Specification Working Group.
 
     In addition, if pathToHits is specified, all matching reads are written
-    to this path and file. Alignments are written in SAM format (no header
-    lines) with 3 added optional fields:
+    to this path and file. Alignments are written in SAM format with 3 added 
+    optional fields:
     1. fe:Z:FEATURE_NAME
     2. ba:i:TAIL_LENGTH_BASE
     3. en:i:TAIL_LENGTH_END (or -1 if not an end match)
@@ -70,8 +70,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     5. cw:i:1/COUNTING_WEIGHT
 
     Finally, if pathToFails is specified, all nonmatching reads are written
-    to this path and file. Alignments are written in SAM format (no header
-    lines) with 1 added optional field:
+    to this path and file. Alignments are written in SAM format with 1 added 
+    optional field:
     1. xx:i:ERROR_CODE
     """
 
@@ -101,43 +101,44 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     
     aa=ht.SAM_Reader(pathToBAM)
     if pathToHits is not None:
-        w_hits=ht.BAM_Writer(pathToHits)
+        w_hits=ht.BAM_Writer.from_BAM_Reader(pathToHits,aa)
     if pathToFails is not None:
-        w_fails=ht.BAM_Writer(pathToFails)
-    for alns in ht.pair_SAM_alignments(aa,bundle=True):
+        w_fails=ht.BAM_Writer.from_BAM_Reader(pathToFails,aa)
+    for bundle in ht.pair_SAM_alignments(aa,bundle=True):
 
         weightMultimappers=0
         failchecks=False
 
         # Determine if the template is a multimapper, and assign weight
-        if len(alns)>1:
+        if len(bundle)>1:
             if countMultimappers==MODE_CNTALL:
                 weightMultimappers=1
             elif countMultimappers==MODE_CNTFRA:
                 weightMultimappers=1/len(bundle)
             elif countMultimappers==MODE_CNTNON:
                 cntBase["_multimapper"]+=1
-                writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["MULTIMAP"]]])
+                for pair in bundle:
+                    writeBAMwithOpts(
+                            w_fails,pair,[["xx","i",ERROR_CODES["MULTIMAP"]]])
                 continue
             else:
                 raise ValueError("Unknown choice for countMultimappers mode.")
         else:
             weightMultimappers=1
 
-        for segs in alns:
+        for pair in bundle:
 
             weightOverlappers=0
 
             # Check that the alignment is paired
-            if None in segs:
+            if None in pair:
                 cntBase["_orphan_alignment"]+=weightMultimappers
                 writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["ORPHAN"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["ORPHAN"]]])
                 continue
 
             # Check that all segments are mapped
-            for seg in segs:
+            for seg in pair:
                 if ((not seg.aligned) or \
                         seg.failed_platform_qc or \
                         seg.pcr_or_optical_duplicate):
@@ -147,7 +148,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                 failchecks=False
                 cntBase["_fail_checks"]+=weightMultimappers
                 writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
                 continue
 
             # Identify base transcripts to which the templates matches
@@ -163,9 +164,10 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             id_match=[] # List of ID sets matching each segment in match region
             len_match_any=[] # Length of match region in each segment
             len_match_feat=[] # Length of match region matching a feature
-            for i in range(len(segs)):
+            for i in range(len(pair)):
 
-                len_match.append(0)
+                len_match_any.append(0)
+                len_match_feat.append(0)
                 id_all.append(set())
                 id_match.append(set())
 
@@ -203,17 +205,17 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             if not isLenPassAny:
                 cntBase["_insufficient_match"]+=weightMultimappers
                 writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["NOMATCH"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["NOMATCH"]]])
                 continue
             if not isLenPassFeat:
                 cntBase["_no_feature"]+=weightMultimappers
                 writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["NOFEAT"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
                 continue
-            if len(ids)>0:
+            if len(ids)>1:
                 cntBase["_multifeature"]+=weightMultimappers
                 writeBAMwithOpts(
-                        w_fails,alns,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
                 continue
             
             # Still need to construct the genomic interval 
@@ -222,21 +224,21 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
 
             # Record the match to the base transcript
-            writeBAMwithOpts(w_hits,alns,[["fe","Z",list(ids)[0]]])
+            writeBAMwithOpts(w_hits,pair,[["fe","Z",list(ids)[0]]])
             cntBase[list(ids)[0]]+=1
 
-    aa.close()
     if pathToHits is not None:
         w_hits.close()
     if pathToFails is not None:
         w_fails.close()
 
 
-def writeBAMwithOpts(writer,alns,opts):
+def writeBAMwithOpts(writer,pair,opts):
     """
-    Writes a BAM alignment with the HTSeq BAM writer, adding optional fields.
+    Writes a pair of BAM alignment with the HTSeq BAM writer, 
+    adding optional fields.
     writer: an HTSeq BAM writer
-    alns: an iterable of HTSeq SAM alignments
+    pair: an iterable of HTSeq SAM alignments
     opts: a list of optional fields in the format [[TAG,TYPE,VALUE],...]
         The TAG and TYPE elements must be strings. If the VALUE element is
         not a string already, it will be converted to a string.
@@ -246,13 +248,13 @@ def writeBAMwithOpts(writer,alns,opts):
     for i in range(len(opts)):
         opts[i][2]=str(opts[i][2])
 
-    for aln in alns:
+    for aln in pair:
 
         # Construct the SAM alignment with new optional fields
         line=aln.get_sam_line()
         for opt in opts:
             line="\t".join([line,":".join(opt)])
-        aln_new=ht.SAM_Alignment(line)
+        aln_new=ht.SAM_Alignment.from_SAM_line(line)
 
         # Write the line
         writer.write(aln_new)
