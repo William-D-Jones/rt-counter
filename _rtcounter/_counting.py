@@ -21,18 +21,25 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     Counts paired-end reads from a BAM file using the following procedure:
     1. A template counts toward a feature's 'base' transcript if:
         a. At least one segment in the template has at least fAnchor CIGAR
-           match operations on its 3' end, uninterrupted by any skip (N)
-           operations, that matches a feature F.
+           match operations that match a feature F.
         b. No nucleotides in either segment of the template match any features
            other than F.
-        c. The other segment in the template has at least fAnchor CIGAR match
-           operations on its 3' end uninterrupted by any skip (N) operations,
-           that may or may not match F.
-        d. The genomic interval between the most 3' non-N operation of the
-           first segment and the most 3' non-N operation of the segment segment
-           contains no features other than F.
+        c. The 'inner template interval' contains no features other than F.
+           The inner template interval is the smallest genomic interval
+           containing:
+               i.  The leftmost M operation of the + strand segment for which
+                   no N operations lie between this M operation and the
+                   rightmost CIGAR operation in the segment.
+               ii. The rightmost M operation of the - strand segment for 
+                   which no N operations lie between this M operation and 
+                   the leftmost CIGAR operation in the segment.
     2. A template counts toward a feature's 'end' transcript if:
         a. It counts toward the feature's 'base' transcript.
+        b. Either the inner template interval or at least one of the segments
+           contains at least fAnchor CIGAR operations matching
+
+
+
         b. The genomic interval specified in (1d) contains fAnchor of the most
            3' nucleotides of the most 3' exon in F.
     3. A template counts toward a feature's 'readthrough' transcript if:
@@ -141,7 +148,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             for seg in pair:
                 if ((not seg.aligned) or \
                         seg.failed_platform_qc or \
-                        seg.pcr_or_optical_duplicate):
+                        seg.pcr_or_optical_duplicate or \
+                        (not seg.proper_pair)):
                     failchecks=True
                     break
             if failchecks:
