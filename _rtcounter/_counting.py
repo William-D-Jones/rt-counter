@@ -21,31 +21,36 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     Counts paired-end reads from a BAM file using the following procedure:
     1. A template counts toward a feature's 'base' transcript if:
         a. At least one segment in the template has at least fAnchor CIGAR
-           match operations that match a feature F.
+           match operations (M, =, or X) that match a feature F.
         b. No nucleotides in either segment of the template match any features
            other than F.
         c. The 'inner template interval' contains no features other than F.
            The inner template interval is the smallest genomic interval
-           containing:
-               i.  The leftmost M operation of the + strand segment for which
-                   no N operations lie between this M operation and the
-                   rightmost CIGAR operation in the segment.
-               ii. The rightmost M operation of the - strand segment for 
-                   which no N operations lie between this M operation and 
-                   the leftmost CIGAR operation in the segment.
+           containing (in other words, flanked by):
+            i.  The leftmost M operation of the + strand segment for which
+                no N operations lie between this M operation and the
+                rightmost CIGAR operation in the segment.
+            ii. The rightmost M operation of the - strand segment for 
+                which no N operations lie between this M operation and 
+                the leftmost CIGAR operation in the segment.
     2. A template counts toward a feature's 'end' transcript if:
         a. It counts toward the feature's 'base' transcript.
-        b. Either the inner template interval or at least one of the segments
-           contains at least fAnchor CIGAR operations matching
-
-
-
-        b. The genomic interval specified in (1d) contains fAnchor of the most
-           3' nucleotides of the most 3' exon in F.
+        b. One of the following is true:
+            i.  The inner template interval contains at least fAnchor 
+                nucleotides of the most 3' exon in F including the most 3'
+                nucleotide of this exon, or
+            ii. Condition (i) is false but at least one of the segments
+                contains at least fAnchor match operations, uninterrupted by
+                any N operations, that match the most 3' exon in F and the
+                most 3' nucleotide of this exon.
     3. A template counts toward a feature's 'readthrough' transcript if:
         a. It counts toward the feature's 'end' transcript.
-        b. The genomic interval specified in (1d) contains rtAnchor of the
-           nucleotides immediately following the most 3' exon in F.
+        b. The 'tail length' is at least rtAnchor. For every template
+           matching the end transcript, the tail length is the distance of 
+           the path starting from the most 3' nucleotide of the most 3' exon 
+           of the feature to the end of the inner template interval such
+           that this path follows the same direction of transcription as the
+           feature.
 
     The counting procedure is performed at the exon level. Therefore, if 
     multiple transcripts are produced from the same genomic feature, only
@@ -58,10 +63,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     1. counts_base: the counts to the base transcript
     2. counts_end: the counts to the end transcript
     3. counts_readthrough: the counts to the readthrough transcript
-    4. tail_length_base: a comma-separated list of lengths that the
-       readthrough transcript reads extend past the 3' end of the feature
-    5. tail_length_end: the tail lengths of the end transcript reads
-    6. tail_length_readthrough: the tail lengths of the readthrough transcript
+    4. tail_length_end: the tail lengths of the end transcript reads
+    5. tail_length_readthrough: the tail lengths of the readthrough transcript
        reads
 
     SAM file reading follows "Sequence Alignment/Map Format Specification"
@@ -144,7 +147,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                         w_fails,pair,[["xx","i",ERROR_CODES["ORPHAN"]]])
                 continue
 
-            # Check that all segments are mapped
+            # Check that all segments are aligned and properly paired
             for seg in pair:
                 if ((not seg.aligned) or \
                         seg.failed_platform_qc or \
