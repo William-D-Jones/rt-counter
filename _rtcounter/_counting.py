@@ -74,10 +74,12 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     to this path and file. Alignments are written in SAM format with 3 added 
     optional fields:
     1. fe:Z:FEATURE_NAME
-    2. ba:i:TAIL_LENGTH_BASE
-    3. en:i:TAIL_LENGTH_END (or -1 if not an end match)
-    4. rt:i:TAIL_LENGTH_READTHROUGH (or -1 if not a readthrough match)
-    5. cw:i:1/COUNTING_WEIGHT
+    2. ba:i:LEN (count of match operations supporting base transcript)
+    3. en:i:LEN (count of match operations supporting end transcript)
+    4. te:i:TAIL_LENGTH_END (-1 if not an end match)
+    5. rt:i:LEN (count of match operations supporting readthrough transcript)
+    6. tr:i:TAIL_LENGTH_READTHROUGH (-1 if not a readthrough match)
+    7. cw:i:1/COUNTING_WEIGHT
 
     Finally, if pathToFails is specified, all nonmatching reads are written
     to this path and file. Alignments are written in SAM format with 1 added 
@@ -162,87 +164,83 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                         w_fails,pair,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
                 continue
 
-            # Identify base transcripts to which the templates matches
-
-            # First, identify candidate matches
-
-            # The 'match region' is the portion of the CIGAR that we require to 
-            # contain a match, that is, the longest possible continuous portion 
-            # of the CIGAR containing the CIGAR's rightmost match operation 
-            # (M, =, or X) but not containing any skips (N)
-
-            id_all=[] # List of ID sets matching each segment
-            id_match=[] # List of ID sets matching each segment in match region
-            len_match_any=[] # Length of match region in each segment
-            len_match_feat=[] # Length of match region matching a feature
-            for i in range(len(pair)):
-
-                len_match_any.append(0)
-                len_match_feat.append(0)
-                id_all.append(set())
-                id_match.append(set())
-
+            # Identify features and match operation counts supporting each one
+            listCntFeat=[]
+            listIvFlank=[]
+            isMultifeat=False
+            for seg in pair:
+                collect=True # Should we overrwrite the flank
+                ivFlank=None # Holds the latest flank
+                cntFeat=co.Counter()
                 cigar=seg.cigar
-                inMatchReg=True # Tracks if we have encountered an N
-
-                for j in reversed(range(len(cigar))):
-                    if cigar[j].type not in MOPS:
-                        if cigar[j].type in SOPS:
-                            inMatchReg=False
-                        continue
-                    for iv,ff in exons[cigar[j].ref_iv].steps():
-                        id_all[i] |= ff
-                        if inMatchReg:
-                            id_match[i] |= ff
-                            len_match_any[i]+=cigar[j].size
-                            if len(ff)>0:
-                                len_match_feat[i]+=cigar[j].size
-
-            # Second, decide if any of the candidate matches constitutes a
-            # match to the corresponding 'base' transcript
-
-            ids=set()
-            isLenPassAny=True
-            isLenPassFeat=False
-            for i in range(len(id_all)):
-                if countMultifeature:
-                    ids |= id_match[i]
-                else:
-                    ids |= id_all[i]
-                if len_match_feat[i]>=fAnchor:
-                    isLenPassFeat=True
-                if len_match_any[i]<fAnchor:
-                    isLenPassAny=False
-            if not isLenPassAny:
-                cntBase["_insufficient_match"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["NOMATCH"]]])
-                continue
-            if not isLenPassFeat:
-                cntBase["_no_feature"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
-                continue
-            if len(ids)>1:
+                for op in cigar:
+                    if op.type in MOPS:
+                        for iv,ff in exons[op.ref_iv].steps():
+                            for f in ff:
+                                cntFeat[f]+=iv.length
+                        if collect:
+                            ivFlank=op.ref_iv
+                            if seg.iv.strand="-":
+                                collect=False
+                if len(cntFeat.keys())>0:
+                    isMultifeat=True
+                    break
+                listCntFeat.append(cntFeat)
+                listIvFlank.append(ivFlank)
+            # Construct and check the inner template interval
+            if not isMultifeat:
+                itiStart=None
+                itiEnd=None
+                itiChrom=None
+                for iv in listIvFlank:
+                    if ((itiStart is None) or iv.start<itiStart):
+                        itiStart=iv.start
+                    if ((itiEnd is None) or iv.end>itiEnd):
+                        itiEnd=iv.end
+                    if itiChrom is None:
+                        itiChrom=iv.chrom
+                iti=GenomicInterval(itiChrom,itiStart,itiEnd,".")
+                itiFeat=set()
+                for iv,ff in exons[iti].steps():
+                    itiFeat |= ff
+                if len(itiFeat)>1:
+                    isMultifeat=True
+            # Check if any segment overlaps multiple features
+            if isMultifeat:
                 cntBase["_multifeature"]+=weightMultimappers
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
                 continue
-            
-            # Still need to construct the genomic interval 
-            # spanned by the template
-            # To find out if the final condition is fulfilled
-
+            # Check if the match length if sufficient to declare a base match
+            isLenPass=False
+            lenBase=0
+            featBase=None
+            for cntFeat in listCntFeat:
+                for f in list(cntFeat.keys()):
+                    if featBase is None:
+                        featBase=f
+                    if cntFeat[f]>lenBase:
+                        lenBase=cnt
+            if featBase is None:
+                cntBase["_no_feature"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
+                continue
+            if lenBase<fAnchor:
+                cntBase["_insufficient_match"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["NOMATCH"]]])
+                continue
 
             # Record the match to the base transcript
-            writeBAMwithOpts(w_hits,pair,[["fe","Z",list(ids)[0]]])
-            cntBase[list(ids)[0]]+=1
+            writeBAMwithOpts(w_hits,pair,
+                    [["fe","Z",featBase],["ba","i",lenBase]])
+            cntBase[featBase]+=1
 
     if pathToHits is not None:
         w_hits.close()
     if pathToFails is not None:
         w_fails.close()
-
 
 def writeBAMwithOpts(writer,pair,opts):
     """
