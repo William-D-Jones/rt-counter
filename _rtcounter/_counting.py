@@ -12,9 +12,15 @@ MOPS=set(["M","=","X"]) # CIGAR operations interpreted as matches
 SOPS=set(["N"]) # CIGAR operations interpreted as skips
 
 # Miscellaneous constants
-ERROR_CODES={"ORPHAN":"1","FAILCHECKS":"2","INSMATCH":3,"NOFEAT":4,
-        "MULTIMAP":5,"MULTIFEAT":6,"MULTIFEAT_INT":7}
-
+ERROR_CODES={
+        "MULTIMAP":1,
+        "ORPHAN":2,
+        "FAILCHECKS":3,
+        "NOFEAT":4,
+        "MULTIFEAT":5,
+        "INSMATCH":6,
+        "MULTIFEAT_INT":7}
+        
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
         countMultimappers):
     """
@@ -24,7 +30,10 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
            match operations (M, =, or X) that match a feature F.
         b. No nucleotides in either segment of the template match any features
            other than F.
-        c. The 'inner template interval' contains no features other than F.
+        c. Either the 'inner template interval' contains no features other 
+           than F, or both segments in the template have at least 1 CIGAR
+           match operation that matches to F.
+
            The inner template interval is the smallest genomic interval
            containing (in other words, flanked by):
             i.  The leftmost M operation of the + strand segment for which
@@ -164,6 +173,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                         w_fails,pair,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
                 continue
 
+            # Evaluate counts to the base transcript
             # Identify features and match operation counts supporting each one
             listCntFeat=[]
             featSegs=set()
@@ -189,11 +199,32 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                     break
                 listCntFeat.append(cntFeat)
                 listIvFlank.append(ivFlank)
+            # Check if the segments match to any feature
+            if len(featSegs)==0:
+                cntBase["_no_feature"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
+                continue
             # Check if any segment overlaps multiple features
             if isMultifeat:
                 cntBase["_multifeature_segments"]+=weightMultimappers
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
+                continue
+            # Check if the match length if sufficient to declare a base match
+            isLenPass=False
+            lenBase=0
+            featBase=list(featSegs)[0]
+            isAllSegsMatch=True
+            for cntFeat in listCntFeat:
+                if cntFeat[featBase]>lenBase:
+                    lenBase=cntFeat[featBase]
+                if cntFeat[featBase]==0:
+                    isAllSegsMatch=False
+            if lenBase<fAnchor:
+                cntBase["_insufficient_match"]+=weightMultimappers
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["INSMATCH"]]])
                 continue
             # Construct and check the inner template interval
             isItiMultifeat=False
@@ -214,33 +245,18 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             if len(itiFeat)>1:
                 isItiMultifeat=True
             # Check if the iti overlaps multiple features
-            if isItiMultifeat:
+            if (isItiMultifeat and (not isAllSegsMatch)):
                 cntBase["_multifeature_template"]+=weightMultimappers
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT_INT"]]])
-                continue
-            # Check if the match length if sufficient to declare a base match
-            isLenPass=False
-            lenBase=0
-            if len(featSegs)==0:
-                cntBase["_no_feature"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
-                continue
-            featBase=list(featSegs)[0]
-            for cntFeat in listCntFeat:
-                if cntFeat[featBase]>lenBase:
-                    lenBase=cntFeat[featBase]
-            if lenBase<fAnchor:
-                cntBase["_insufficient_match"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["INSMATCH"]]])
                 continue
 
             # Record the match to the base transcript
             writeBAMwithOpts(w_hits,pair,
                     [["fe","Z",featBase],["ba","i",lenBase]])
             cntBase[featBase]+=1
+
+
 
     if pathToHits is not None:
         w_hits.close()
