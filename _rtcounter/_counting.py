@@ -98,23 +98,27 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
-    exonsLatest={} # Holds the most 3' exon of each feature.name so far
+    exonsTerm={} # Holds the most 3' exon of each feature.name so far
     strands={}
     for feature in ff:
         if feature.type=="exon":
             exons[feature.iv]+=feature.name
             if feature.name not in strands.keys():
                 strands[feature.name]=feature.iv.strand
-            if ((feature.name not in exonsLatest.keys()) or \
+            if ((feature.name not in exonsTerm.keys()) or \
                     (feature.iv.strand=="-" and \
-                    feature.iv.end<exonsLatest[feature.name].iv.end) or \
+                    feature.iv.start<exonsTerm[feature.name].iv.start) or \
                     (feature.iv.strand=="+" and \
-                    feature.iv.end>exonsLatest[feature.name].iv.end)):
-                exonsLatest[feature.name]=feature
-    exonsTerm=ht.GenomicArrayOfSets("auto",stranded=False)
-    for key in exonsLatest.keys():
-        feature=exonsLatest[key]
-        exonsTerm[feature.iv]+=feature.name
+                    feature.iv.end>exonsTerm[feature.name].iv.end)):
+                if feature.iv.strand="+":
+                    start=feature.iv.end-fAnchor
+                    end=feature.iv.end
+                elif feature.iv.strand="-":
+                    start=feature.iv.start
+                    end=start+fAnchor
+                if feature.iv.strand!=".":
+                    exonsTerm[feature.name]=ht.GenomicInterval(
+                            feature.iv.chrom,start,end,feature.iv.strand)
 
     cntBase=co.Counter()
     cntEnd=co.Counter()
@@ -194,7 +198,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                             if seg.iv.strand=="-":
                                 collect=False
                 featSegs |= set(cntFeat.keys())
-                if len(cntFeat.keys())>1 or len(featSegs)>1:
+                if len(featSegs)>1:
                     isMultifeat=True
                     break
                 listCntFeat.append(cntFeat)
@@ -255,6 +259,9 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
             writeBAMwithOpts(w_hits,pair,
                     [["fe","Z",featBase],["ba","i",lenBase]])
             cntBase[featBase]+=1
+
+            # Evaluate counts to the end transcript
+            if exonsTerm[featBase].is_contained_in(iti) or \
 
 
 
