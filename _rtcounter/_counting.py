@@ -18,8 +18,7 @@ ERROR_CODES={
         "FAILCHECKS":3,
         "NOFEAT":4,
         "MULTIFEAT":5,
-        "INSMATCH":6,
-        "MULTIFEAT_INT":7}
+        "INSMATCH":6}
         
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
         countMultimappers):
@@ -117,8 +116,25 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                     start=feature.iv.start
                     end=start+fAnchor
                 if feature.iv.strand!=".":
-                    exonsTerm[feature.name]=ht.GenomicInterval(
+                    ivTerm=ht.GenomicInterval(
                             feature.iv.chrom,start,end,feature.iv.strand)
+                    if ivTerm.length>=fAnchor:
+                        exonsTerm[feature.name]=ivTerm
+    # For each terminal exon, get the interval of the terminal nucleotide
+    nucsTerm={}
+    for key in exonsTerm.keys():
+        if exonsTerm[key].strand=="+":
+            nucsTerm[key]=ht.GenomicInterval(
+                    exonsTerm[key].chrom,
+                    exonsTerm[key].end-1,
+                    exonsTerm[key].end,
+                    exonsTerm[key].strand)
+        elif exonsTerm[key].strand=="-":
+            nucsTerm[key]=ht.GenomicInterval(
+                    exonsTerm[key].chrom,
+                    exonsTerm[key].start,
+                    exonsTerm[key].start+1,
+                    exonsTerm[key].strand)
 
     cntBase=co.Counter()
     cntEnd=co.Counter()
@@ -230,8 +246,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["INSMATCH"]]])
                 continue
-            # Construct and check the inner template interval
-            isItiMultifeat=False
+            # Construct the inner template interval
             itiStart=None
             itiEnd=None
             itiChrom=None
@@ -243,25 +258,57 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                 if itiChrom is None:
                     itiChrom=iv.chrom
             iti=ht.GenomicInterval(itiChrom,itiStart,itiEnd,".")
-            itiFeat=set()
-            for iv,ff in exons[iti].steps():
-                itiFeat |= ff
-            if len(itiFeat)>1:
-                isItiMultifeat=True
-            # Check if the iti overlaps multiple features
-            if (isItiMultifeat and (not isAllSegsMatch)):
-                cntBase["_multifeature_template"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT_INT"]]])
-                continue
 
             # Record the match to the base transcript
-            writeBAMwithOpts(w_hits,pair,
-                    [["fe","Z",featBase],["ba","i",lenBase]])
-            cntBase[featBase]+=1
+            cntBase[featBase]+=weightMultimappers
 
             # Evaluate counts to the end transcript
-            if exonsTerm[featBase].is_contained_in(iti) or \
+            listLenEndMatch=[]
+            if not nucsTerm[featBase].overlaps(iti):
+                ivEndFeat=None
+                for seg in pair:
+                    listLenEndMatch.append(0)
+                    lenEndMatch=0
+                    cigar=seg.cigar
+                    for op in cigar:
+                        if op.type in MOPS:
+                            lenEndMatch+=op.size
+                            if ivEndFeat is None:
+                                ivEndFeat=op.ref_iv
+                            else:
+                                ivEndFeat.extend_to_include(op.ref_iv)
+                        elif op.type in SOPS:
+                            if ivEndFeat.overlaps(nucsTerm[featBase]):
+                                listLenEndMatch[-1]=lenEndMatch
+                                break
+                            else:
+                                ivEndFeat=None
+            else:
+                listLenEnd.append(min(iit.end,exonsTerm[featBase].end)-\
+                    max(iit.start,exonsTerm[featBase].start))
+
+
+
+            if not isEnd:
+                writeBAMwithOpts(w_hits,pair,
+                        [["fe","Z",featBase],
+                            ["ba","i",lenBase],
+                            ["en","i",0]])
+                continue
+            if isEnd:
+                if max(lenEnd)<fAnchor:
+                    writeBAMwithOpts(w_hits,pair,
+                            [["fe","Z",featBase],
+                                ["ba","i",lenBase],
+                                ["en","i",0]])
+                    continue
+                    
+
+
+
+                
+
+
 
 
 
