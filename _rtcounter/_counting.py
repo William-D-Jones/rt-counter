@@ -19,75 +19,76 @@ ERROR_CODES={
         "NOFEAT":4,
         "MULTIFEAT":5,
         "INSMATCH":6}
+
+def overlap(listOfGenomicIntervals):
+    """
+    Computes length of overlap among a collection of HTSeq
+    GenomicInterval objects.
+    """
+
+    start=[]
+    end=[]
+    for iv in listOfGenomicIntervals:
+        start.append(iv.start)
+        end.append(iv.end)
+    ov=min(end)-max(start)
+
+    return ov
         
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
         countMultimappers):
     """
     Counts paired-end reads from a BAM file using the following procedure:
-    1. A template counts toward a feature's 'base' transcript if:
-        a. At least one segment in the template has at least fAnchor CIGAR
-           match operations (M, =, or X) that match a feature F.
-        b. No nucleotides in either segment of the template match any features
-           other than F.
-        c. Either the 'inner template interval' contains no features other 
-           than F, or both segments in the template have at least 1 CIGAR
-           match operation that matches to F.
+    1. A template counts toward the 'base' transcript of a feature F if:
+        a. It is mapped uniquely.
+        b. It fulfills these "check" criteria according to
+           the aligner: all segments are aligned, properly paired, not
+           PCR or optical duplicates, and do not fail the platform QC.
+        c. At least one segment in the template has at least fAnchor CIGAR
+           match operations (M, =, or X) that overlap F.
+        d. No CIGAR match operations in either segment of the template
+           overlap any features other than F.
+        e. With respect to the direction of transcription of F, no 
+           CIGAR match operations in either segment of the template
+           overlap any interval lying immediately upstream of the most 
+           upstream exon of F.
+    2. A template also counts toward the 'readthrough' transcript of F if
+       it counts toward F's 'base' transcript and also:
+        d. At least one segment in the template has at least 1 CIGAR
+           match operations that overlaps an interval lying downstream of the 
+           most downstream exon of F.
 
-           The inner template interval is the smallest genomic interval
-           containing (in other words, flanked by):
-            i.  The leftmost M operation of the + strand segment for which
-                no N operations lie between this M operation and the
-                rightmost CIGAR operation in the segment.
-            ii. The rightmost M operation of the - strand segment for 
-                which no N operations lie between this M operation and 
-                the leftmost CIGAR operation in the segment.
-    2. A template counts toward a feature's 'end' transcript if:
-        a. It counts toward the feature's 'base' transcript.
-        b. One of the following is true:
-            i.  The inner template interval contains at least fAnchor 
-                nucleotides of the most 3' exon in F including the most 3'
-                nucleotide of this exon, or
-            ii. Condition (i) is false but at least one of the segments
-                contains at least fAnchor match operations, uninterrupted by
-                any N operations, that match the most 3' exon in F and the
-                most 3' nucleotide of this exon.
-    3. A template counts toward a feature's 'readthrough' transcript if:
-        a. It counts toward the feature's 'end' transcript.
-        b. The 'tail length' is at least rtAnchor. For every template
-           matching the end transcript, the tail length is the distance of 
-           the path starting from the most 3' nucleotide of the most 3' exon 
-           of the feature to the end of the inner template interval such
-           that this path follows the same direction of transcription as the
-           feature.
+        For every template satisfying criteria a-d, we calculate the
+        'tail length' for each segment:
+           The tail length is the length of the interval bounded
+           by, but not containing, the most downstream nucleotide of the most 
+           downstream exon in F and the most upstream N operation in the
+           segment, with respect to F, that is downstream of the most
+           downstream match operation in the segment that overlaps F. In
+           other words, the interval used for the tail length must contain
+           no N operations.
 
-    The counting procedure is performed at the exon level. Therefore, if 
-    multiple transcripts are produced from the same genomic feature, only
-    readthrough in transcripts that contain the full length of the most 3'
-    exon (relative to the direction of transcription) will have their 
-    readthrough correctly evaluated.
+    Returns:
 
-    Returns a Pandas dataframe containing these columns, left-to-right:
-    0. name: the name of the gene
-    1. counts_base: the counts to the base transcript
-    2. counts_end: the counts to the end transcript
-    3. counts_readthrough: the counts to the readthrough transcript
-    4. tail_length_end: the tail lengths of the end transcript reads
-    5. tail_length_readthrough: the tail lengths of the readthrough transcript
-       reads
+    (i)
+    A Pandas dataframe containing these columns, left-to-right:
+    0. id: the id of the feature
+    1. count_base: the count to the base transcript
+    2. count_readthrough: the count to the readthrough transcript
+
+    (ii)
+    A dictionary in which each id from the dataframe is a key whose value
+    is a list of the tail lengths 
 
     SAM file reading follows "Sequence Alignment/Map Format Specification"
     updated April 30, 2020 from the SAM/BAM Format Specification Working Group.
 
     In addition, if pathToHits is specified, all matching reads are written
-    to this path and file. Alignments are written in SAM format with 3 added 
-    optional fields:
+    to this path and file. Alignments are written in SAM format with these 
+    added optional fields:
     1. fe:Z:FEATURE_NAME
     2. ba:i:LEN (count of match operations supporting base transcript)
-    3. en:i:LEN (count of match operations supporting end transcript)
-    4. te:i:TAIL_LENGTH_END (-1 if not an end match)
-    5. rt:i:LEN (count of match operations supporting readthrough transcript)
-    6. tr:i:TAIL_LENGTH_READTHROUGH (-1 if not a readthrough match)
-    7. cw:i:1/COUNTING_WEIGHT
+    3. tl:i:TAIL_LENGTH (or -1 if not a readthrough match)
 
     Finally, if pathToFails is specified, all nonmatching reads are written
     to this path and file. Alignments are written in SAM format with 1 added 
@@ -97,8 +98,8 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
-    exonsTerm={} # Holds the most 3' exon of each feature.name so far
-    strands={}
+    ivsExonsDown={} # Holds the most downstream exon of each feature.name
+    ivsExonsUp={} # Holds the most upstream exon of each feature.name
     for feature in ff:
         if feature.type=="exon":
             exons[feature.iv]+=feature.name
@@ -120,21 +121,6 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                             feature.iv.chrom,start,end,feature.iv.strand)
                     if ivTerm.length>=fAnchor:
                         exonsTerm[feature.name]=ivTerm
-    # For each terminal exon, get the interval of the terminal nucleotide
-    nucsTerm={}
-    for key in exonsTerm.keys():
-        if exonsTerm[key].strand=="+":
-            nucsTerm[key]=ht.GenomicInterval(
-                    exonsTerm[key].chrom,
-                    exonsTerm[key].end-1,
-                    exonsTerm[key].end,
-                    exonsTerm[key].strand)
-        elif exonsTerm[key].strand=="-":
-            nucsTerm[key]=ht.GenomicInterval(
-                    exonsTerm[key].chrom,
-                    exonsTerm[key].start,
-                    exonsTerm[key].start+1,
-                    exonsTerm[key].strand)
 
     cntBase=co.Counter()
     cntEnd=co.Counter()
@@ -284,8 +270,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                             else:
                                 ivEndFeat=None
             else:
-                listLenEnd.append(min(iit.end,exonsTerm[featBase].end)-\
-                    max(iit.start,exonsTerm[featBase].start))
+                listLenEnd.append(overlap([iit,exonsTerm[featBase]))
 
 
 
