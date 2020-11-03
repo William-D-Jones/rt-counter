@@ -17,28 +17,6 @@ ERROR_CODES={
         "INSUFF_MATCH":6,
         "UPSTREAM_MATCH":7}
 
-def msg(message):
-    """
-    Print a string with date and time.
-    """
-    txt="\t".join([dt.datetime.now(),message])
-    print(txt)
-
-def overlap(listOfGenomicIntervals):
-    """
-    Computes length of overlap among a collection of HTSeq
-    GenomicInterval objects.
-    """
-
-    start=[]
-    end=[]
-    for iv in listOfGenomicIntervals:
-        start.append(iv.start)
-        end.append(iv.end)
-    ov=min(end)-max(start)
-
-    return ov
-        
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     """
     Counts paired-end reads from a BAM file using the following procedure:
@@ -99,7 +77,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     1. xx:i:ERROR_CODE
     """
 
-    msg("Reading feature file...")
+    _msg("Reading feature file...")
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
     # The ivBounds dictionary has feature names as its keys and values
@@ -114,7 +92,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                     ivBounds[feature.name]=feature.iv
                 else:
                     ivBounds[feature.name].extend_to_include(feature.iv)
-    msg("".join(["Read ",str(len(exons.keys()))," named groups of exons."]))
+    _msg("".join(["Read ",str(len(ivBounds.keys()))," named sets of exons."]))
 
     cntBase=co.Counter() # Counter of base transcripts and errors
     cntRT=co.Counter() # Counter of readthrough transcripts
@@ -131,14 +109,14 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     else:
         w_fails=None
 
-    msg("Started counting reads...")
+    _msg("Started counting reads...")
 
     for bundle in ht.pair_SAM_alignments(aa,bundle=True):
 
         # Progress update
         prog["READS"]+=1
         if prog["READS"]>0 and prog["READS"]%10000==0:
-            msg("".join(["In progress: Counted ",str(prog["READS"]),
+            _msg("".join(["In progress: Counted ",str(prog["READS"]),
                 " reads, ",str(cntBase["_HITS"])," base hits, and ",
                 str(cntRT["_HITS"])," readthrough hits."]))
 
@@ -210,108 +188,123 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                 continue
             # Check if the overlap length is sufficient to declare a base match
             nameBase=list(namesBase)[0]
-            lenBase=max(list(listCntNames.values()))
-        if lenBase<fAnchor:
-            cntBase["_INSUFF_MATCH"]+=1
-            writeBAMwithOpts(
-                    w_fails,pair,[["xx","i",ERROR_CODES["INSUFF_MATCH"]]])
-            continue
-
-        # Extract information about the matched name
-        ivBase=ivBounds[nameBase]
-        sBase=ivBase.strand
-
-        # Identify upstream matches (upstream of the most upstream exon)
-        isUp=False # Set to True if we find an upstream match
-        for seg in pair:
-            if ((sBase=="+" and seg.iv.start<ivBase.start) or \
-                    (sBase=="-" and seg.iv.end>ivBase.end)):
-                isUp=True
-                break
-        if isUp:
-            cntBase["_UPSTREAM_MATCH"]+=1
-            writeBAMwithOpts(
-                    w_fails,pair,
-                    [["xx","i",ERROR_CODES["UPSTREAM_MATCH"]]])
-            continue
-
-        # Identify readthrough (matches downstream of the most downstream exon)
-        for seg in pair:
-
-            # Check if the segment spans downstream of the exons at all
-            if ((sBase=="+" and seg.iv.end<=ivBase.end) or \
-                    (sBase=="-" and seg.iv.start>=ivBase.start)):
+            lenBase=0
+            for cntNames in listCntNames:
+                if cntNames[nameBase]>lenBase:
+                    lenBase=cntNames[nameBase]
+            if lenBase<fAnchor:
+                cntBase["_INSUFF_MATCH"]+=1
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["INSUFF_MATCH"]]])
                 continue
-            
-            # Construct an interval of length 0, to be included to include
-            # any CIGAR operations that qualify as readthrough
-            if sBase=="+":
-                posBound=ivBase.end
-            elif sBase=="-":
-                posBound=ivBase.start
-            ivRT=ht.GenomicInterval(
-                    ivBase.chrom,posBound,posBound,sBase)
 
-            # Construct a downstream iterator through the CIGAR
-            if seg.iv.strand=="+":
-                itCIGAR=seg.cigar
-            elif seg.iv.strand=="-":
-                itCIGAR=reversed(seg.cigar)
+            # Extract information about the matched name
+            ivBase=ivBounds[nameBase]
+            sBase=ivBase.strand
 
-            # Update ivRT to include any readthrough
-            isReading=False # True if we are in readthrough operations
-            for op in itCIGAR:
-                if op in ROPS:
-                    if op not in SOPS:
-                        isReading=True
-                        if ((sBase=="+" and op.ref_iv.end>ivBase.end) or \
-                                (sBase=="-" and op.ref_iv.start<ivBase.start)):
-                            ivRT.extend_to_include(op.ref_iv)
-                    elif isReading: # Encountered a skip, so stop counting
+            # Identify upstream matches (upstream of the most upstream exon)
+            isUp=False # Set to True if we find an upstream match
+            for seg in pair:
+                if ((sBase=="+" and seg.iv.start<ivBase.start) or \
+                        (sBase=="-" and seg.iv.end>ivBase.end)):
+                    isUp=True
+                    break
+            if isUp:
+                cntBase["_UPSTREAM_MATCH"]+=1
+                writeBAMwithOpts(
+                        w_fails,pair,
+                        [["xx","i",ERROR_CODES["UPSTREAM_MATCH"]]])
+                continue
 
-                        # Correct the upstream bound of ivRT
-                        if sBase=="+":
-                            ivRT.start=ivBase.end
-                        elif sBase=="-":
-                            ivRT.end=ivBase.start
+            # Identify readthrough (downstream of the most downstream exon)
+            listLenRT=[0]
+            for seg in pair:
 
-                        listLenRT.append(ivRT.length)
-                        break
-        lenRT=max(listLenRT)
+                # Check if the segment spans downstream of the exons at all
+                if ((sBase=="+" and seg.iv.end<=ivBase.end) or \
+                        (sBase=="-" and seg.iv.start>=ivBase.start)):
+                    continue
+                
+                # Construct an interval of length 0, to be included to include
+                # any CIGAR operations that qualify as readthrough
+                if sBase=="+":
+                    posBound=ivBase.end
+                elif sBase=="-":
+                    posBound=ivBase.start
+                ivRT=ht.GenomicInterval(
+                        ivBase.chrom,posBound,posBound,".")
 
-        # Increment counters
-        cntBase[nameBase]+=1
-        cntBase["_HITS"]+=1
-        if lenRT>0:
-            cntRT[nameBase]+=1
-            cntRT["_HITS"]+=1
-            dictRT[nameBase].append(lenRT)
+                # Construct a downstream iterator through the CIGAR
+                if seg.iv.strand=="+":
+                    itCIGAR=seg.cigar
+                elif seg.iv.strand=="-":
+                    itCIGAR=reversed(seg.cigar)
 
-        # Write the hit
-        if pathToHits is not None:
-            opts=[["fe","Z",nameBase],["ba","i",lenBase]]
+                # Update ivRT to include any readthrough
+                isReading=False # True if we are in readthrough operations
+                for op in itCIGAR:
+                    if op.type in ROPS:
+                        if op.type not in SOPS:
+                            if ((sBase=="+" and op.ref_iv.end>ivBase.end) or \
+                                    (sBase=="-" and \
+                                    op.ref_iv.start<ivBase.start)):
+                                isReading=True
+                                ivRT.extend_to_include(op.ref_iv)
+                        elif isReading: # Encountered a skip, so stop counting
+
+                            # Correct the upstream bound of ivRT
+                            if sBase=="+":
+                                ivRT.start=ivBase.end
+                            elif sBase=="-":
+                                ivRT.end=ivBase.start
+
+                            listLenRT.append(ivRT.length)
+                            break
+            lenRT=max(listLenRT)
+
+            # Increment counters
+            cntBase[nameBase]+=1
+            cntBase["_HITS"]+=1
             if lenRT>0:
-                opts.append(["tl","i",lenRT])
-            writeBAMwithOpts(w_hits,pair,opts)
+                cntRT[nameBase]+=1
+                cntRT["_HITS"]+=1
+                dictRT[nameBase].append(lenRT)
+
+            # Write the hit
+            if pathToHits is not None:
+                opts=[["fe","Z",nameBase],["ba","i",lenBase]]
+                if lenRT>0:
+                    opts.append(["tl","i",lenRT])
+                writeBAMwithOpts(w_hits,pair,opts)
 
     if pathToHits is not None:
         w_hits.close()
     if pathToFails is not None:
         w_fails.close()
 
-    msg("".join["Finished counting reads. Summary of results:",
-        "Total reads from file: ",str(prog["READS"]),
-        "Total base hits: ",str(cntBase["_HITS"]),
-        "Total readthrough hits: ",str(cntRT["_HITS"]),
-        "Total multi-mapping reads: ",str(cntBase["_MULTI_MAP"]),
-        "Total orphan reads: ",str(cntBase["_ORPHAN"]),
-        "Total reads failing checks: ",str(cntBase["_FAIL_CHECKS"]),
+    _msg("".join(["Finished counting reads.","\n\t","Summary of results:",
+        "\n\t","Total reads from file: ",str(prog["READS"]),"\n\t",
+        "Total base hits: ",str(cntBase["_HITS"]),"\n\t",
+        "Total readthrough hits: ",str(cntRT["_HITS"]),"\n\t",
+        "Total multi-mapping reads: ",str(cntBase["_MULTI_MAP"]),"\n\t",
+        "Total orphan reads: ",str(cntBase["_ORPHAN"]),"\n\t",
+        "Total reads failing checks: ",str(cntBase["_FAIL_CHECKS"]),"\n\t",
         "Total reads matching no feature name: ",str(cntBase["_NO_NAME"]),
+        "\n\t",
         "Total reads matching multiple names: ",str(cntBase["_MULTI_NAME"]),
+        "\n\t",
         "Total reads with too few matches: ",str(cntBase["_INSUFF_MATCH"]),
-        "Total reads with upstream match: ",str(cntBase["_UPSTREAM_MATCH"])])
+        "\n\t",
+        "Total reads with upstream match: ",str(cntBase["_UPSTREAM_MATCH"])]))
 
     # Need to return objects
+
+def _msg(message):
+    """
+    Print a string with date and time.
+    """
+    txt="\t".join([str(dt.datetime.now()),message])
+    print(txt)
 
 def writeBAMwithOpts(writer,pair,opts):
     """
