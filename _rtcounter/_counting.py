@@ -1,24 +1,28 @@
 import HTSeq as ht
 import collections as co
-
-# Parser choices
-MODE_CNTALL="count_all"
-MODE_CNTNON="count_none"
-MODE_CNTFRA="count_fractional"
-COUNTMODES=[MODE_CNTALL,MODE_CNTNON,MODE_CNTFRA]
+import datetime as dt
 
 # CIGAR data
 MOPS=set(["M","=","X"]) # CIGAR operations interpreted as matches
 SOPS=set(["N"]) # CIGAR operations interpreted as skips
+ROPS=set(["M","=","X","N","D"]) # Reference-consuming CIGAR operations
 
 # Miscellaneous constants
 ERROR_CODES={
-        "MULTIMAP":1,
+        "MULTI_MAP":1,
         "ORPHAN":2,
-        "FAILCHECKS":3,
-        "NOFEAT":4,
-        "MULTIFEAT":5,
-        "INSMATCH":6}
+        "FAIL_CHECKS":3,
+        "NO_NAME":4,
+        "MULTI_NAME":5,
+        "INSUFF_MATCH":6,
+        "UPSTREAM_MATCH":7}
+
+def msg(message):
+    """
+    Print a string with date and time.
+    """
+    txt="\t".join([dt.datetime.now(),message])
+    print(txt)
 
 def overlap(listOfGenomicIntervals):
     """
@@ -35,8 +39,7 @@ def overlap(listOfGenomicIntervals):
 
     return ov
         
-def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
-        countMultimappers):
+def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     """
     Counts paired-end reads from a BAM file using the following procedure:
     1. A template counts toward the 'base' transcript of a feature F if:
@@ -78,7 +81,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
 
     (ii)
     A dictionary in which each id from the dataframe is a key whose value
-    is a list of the tail lengths 
+    is a list of the tail lengths.
 
     SAM file reading follows "Sequence Alignment/Map Format Specification"
     updated April 30, 2020 from the SAM/BAM Format Specification Working Group.
@@ -88,7 +91,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     added optional fields:
     1. fe:Z:FEATURE_NAME
     2. ba:i:LEN (count of match operations supporting base transcript)
-    3. tl:i:TAIL_LENGTH (or -1 if not a readthrough match)
+    3. tl:i:TAIL_LENGTH (this field is ommitted if there is no readthrough)
 
     Finally, if pathToFails is specified, all nonmatching reads are written
     to this path and file. Alignments are written in SAM format with 1 added 
@@ -96,75 +99,68 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
     1. xx:i:ERROR_CODE
     """
 
+    msg("Reading feature file...")
     ff=ht.GFF_Reader(pathToGTF,end_included=True)
     exons=ht.GenomicArrayOfSets("auto",stranded=False)
-    ivsExonsDown={} # Holds the most downstream exon of each feature.name
-    ivsExonsUp={} # Holds the most upstream exon of each feature.name
+    # The ivBounds dictionary has feature names as its keys and values
+    # consisting of genomic intervals encompassing all exons with each name,
+    # but only exons that have an associated strand + or -
+    ivBounds={}
     for feature in ff:
         if feature.type=="exon":
             exons[feature.iv]+=feature.name
-            if feature.name not in strands.keys():
-                strands[feature.name]=feature.iv.strand
-            if ((feature.name not in exonsTerm.keys()) or \
-                    (feature.iv.strand=="-" and \
-                    feature.iv.start<exonsTerm[feature.name].iv.start) or \
-                    (feature.iv.strand=="+" and \
-                    feature.iv.end>exonsTerm[feature.name].iv.end)):
-                if feature.iv.strand="+":
-                    start=feature.iv.end-fAnchor
-                    end=feature.iv.end
-                elif feature.iv.strand="-":
-                    start=feature.iv.start
-                    end=start+fAnchor
-                if feature.iv.strand!=".":
-                    ivTerm=ht.GenomicInterval(
-                            feature.iv.chrom,start,end,feature.iv.strand)
-                    if ivTerm.length>=fAnchor:
-                        exonsTerm[feature.name]=ivTerm
+            if feature.iv.strand!=".":
+                if (feature.name not in ivBounds.keys()):
+                    ivBounds[feature.name]=feature.iv
+                else:
+                    ivBounds[feature.name].extend_to_include(feature.iv)
+    msg("".join(["Read ",str(len(exons.keys()))," named groups of exons."]))
 
-    cntBase=co.Counter()
-    cntEnd=co.Counter()
-    cntRt=co.Counter()
+    cntBase=co.Counter() # Counter of base transcripts and errors
+    cntRT=co.Counter() # Counter of readthrough transcripts
+    dictRT=co.defaultdict(list) # Lists of tail lengths for each feature name
+    prog={"READS":0} # Holds progress statistics
     
     aa=ht.SAM_Reader(pathToBAM)
     if pathToHits is not None:
         w_hits=ht.BAM_Writer.from_BAM_Reader(pathToHits,aa)
+    else:
+        w_hits=None
     if pathToFails is not None:
         w_fails=ht.BAM_Writer.from_BAM_Reader(pathToFails,aa)
+    else:
+        w_fails=None
+
+    msg("Started counting reads...")
+
     for bundle in ht.pair_SAM_alignments(aa,bundle=True):
 
-        weightMultimappers=0
-        failchecks=False
+        # Progress update
+        prog["READS"]+=1
+        if prog["READS"]>0 and prog["READS"]%10000==0:
+            msg("".join(["In progress: Counted ",str(prog["READS"]),
+                " reads, ",str(cntBase["_HITS"])," base hits, and ",
+                str(cntRT["_HITS"])," readthrough hits."]))
 
-        # Determine if the template is a multimapper, and assign weight
+        # Reject multimappers
         if len(bundle)>1:
-            if countMultimappers==MODE_CNTALL:
-                weightMultimappers=1
-            elif countMultimappers==MODE_CNTFRA:
-                weightMultimappers=1/len(bundle)
-            elif countMultimappers==MODE_CNTNON:
-                cntBase["_multimapper"]+=1
-                for pair in bundle:
-                    writeBAMwithOpts(
-                            w_fails,pair,[["xx","i",ERROR_CODES["MULTIMAP"]]])
-                continue
-            else:
-                raise ValueError("Unknown choice for countMultimappers mode.")
-        else:
-            weightMultimappers=1
+            cntBase["_MULTI_MAP"]+=1
+            for pair in bundle:
+                writeBAMwithOpts(
+                    w_fails,pair,[["xx","i",ERROR_CODES["MULTI_MAP"]]])
+            continue
 
         for pair in bundle:
 
-            weightOverlappers=0
-
             # Check that the alignment is paired
             if None in pair:
-                cntBase["_orphan_alignment"]+=weightMultimappers
+                cntBase["_ORPHAN"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["ORPHAN"]]])
                 continue
 
             # Check that all segments are aligned and properly paired
+            failchecks=False
             for seg in pair:
                 if ((not seg.aligned) or \
                         seg.failed_platform_qc or \
@@ -174,144 +170,162 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor,rtAnchor,\
                     break
             if failchecks:
                 failchecks=False
-                cntBase["_fail_checks"]+=weightMultimappers
+                cntBase["_FAIL_CHECKS"]+=1
                 writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["FAILCHECKS"]]])
+                        w_fails,pair,[["xx","i",ERROR_CODES["FAIL_CHECKS"]]])
                 continue
 
-            # Evaluate counts to the base transcript
-            # Identify features and match operation counts supporting each one
-            listCntFeat=[]
-            featSegs=set()
-            listIvFlank=[]
-            isMultifeat=False
+            # Identify a unique feature name for the template, if it exists
+            # Identify feature names and the supporting match operation counts
+            listCntNames=[]
+            namesBase=set()
+            isMultiName=False # Set to True if an op overlaps multiple names
             for seg in pair:
-                collect=True # Should we overrwrite the flank
-                ivFlank=None # Holds the latest flank
-                cntFeat=co.Counter()
-                cigar=seg.cigar
-                for op in cigar:
+                cntNames=co.Counter()
+                for op in seg.cigar:
                     if op.type in MOPS:
-                        for iv,ff in exons[op.ref_iv].steps():
-                            for f in ff:
-                                cntFeat[f]+=iv.length
-                        if collect:
-                            ivFlank=op.ref_iv
-                            if seg.iv.strand=="-":
-                                collect=False
-                featSegs |= set(cntFeat.keys())
-                if len(featSegs)>1:
-                    isMultifeat=True
-                    break
-                listCntFeat.append(cntFeat)
-                listIvFlank.append(ivFlank)
-            # Check if the segments match to any feature
-            if len(featSegs)==0:
-                cntBase["_no_feature"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["NOFEAT"]]])
-                continue
-            # Check if any segment overlaps multiple features
-            if isMultifeat:
-                cntBase["_multifeature_segments"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["MULTIFEAT"]]])
-                continue
-            # Check if the match length if sufficient to declare a base match
-            isLenPass=False
-            lenBase=0
-            featBase=list(featSegs)[0]
-            isAllSegsMatch=True
-            for cntFeat in listCntFeat:
-                if cntFeat[featBase]>lenBase:
-                    lenBase=cntFeat[featBase]
-                if cntFeat[featBase]==0:
-                    isAllSegsMatch=False
-            if lenBase<fAnchor:
-                cntBase["_insufficient_match"]+=weightMultimappers
-                writeBAMwithOpts(
-                        w_fails,pair,[["xx","i",ERROR_CODES["INSMATCH"]]])
-                continue
-            # Construct the inner template interval
-            itiStart=None
-            itiEnd=None
-            itiChrom=None
-            for iv in listIvFlank:
-                if ((itiStart is None) or iv.start<itiStart):
-                    itiStart=iv.start
-                if ((itiEnd is None) or iv.end>itiEnd):
-                    itiEnd=iv.end
-                if itiChrom is None:
-                    itiChrom=iv.chrom
-            iti=ht.GenomicInterval(itiChrom,itiStart,itiEnd,".")
-
-            # Record the match to the base transcript
-            cntBase[featBase]+=weightMultimappers
-
-            # Evaluate counts to the end transcript
-            listLenEndMatch=[]
-            if not nucsTerm[featBase].overlaps(iti):
-                ivEndFeat=None
-                for seg in pair:
-                    listLenEndMatch.append(0)
-                    lenEndMatch=0
-                    cigar=seg.cigar
-                    for op in cigar:
-                        if op.type in MOPS:
-                            lenEndMatch+=op.size
-                            if ivEndFeat is None:
-                                ivEndFeat=op.ref_iv
-                            else:
-                                ivEndFeat.extend_to_include(op.ref_iv)
-                        elif op.type in SOPS:
-                            if ivEndFeat.overlaps(nucsTerm[featBase]):
-                                listLenEndMatch[-1]=lenEndMatch
+                        for iv,names in exons[op.ref_iv].steps():
+                            if len(names)>1:
+                                isMultiName=True
                                 break
-                            else:
-                                ivEndFeat=None
-            else:
-                listLenEnd.append(overlap([iit,exonsTerm[featBase]))
-
-
-
-            if not isEnd:
-                writeBAMwithOpts(w_hits,pair,
-                        [["fe","Z",featBase],
-                            ["ba","i",lenBase],
-                            ["en","i",0]])
+                            for name in names:
+                                cntNames[name]+=iv.length
+                    if isMultiName:
+                        break
+                if isMultiName:
+                    break
+                namesBase |= set(cntNames.keys())
+                listCntNames.append(cntNames)
+            # Check if any segment overlaps multiple feature names
+            if isMultiName or len(namesBase)>1:
+                cntBase["_MULTI_NAME"]+=1
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["MULTI_NAME"]]])
                 continue
-            if isEnd:
-                if max(lenEnd)<fAnchor:
-                    writeBAMwithOpts(w_hits,pair,
-                            [["fe","Z",featBase],
-                                ["ba","i",lenBase],
-                                ["en","i",0]])
-                    continue
-                    
+            # Check if any segment overlaps any feature name
+            if len(namesBase)==0:
+                cntBase["_NO_NAME"]+=1
+                writeBAMwithOpts(
+                        w_fails,pair,[["xx","i",ERROR_CODES["NO_NAME"]]])
+                continue
+            # Check if the overlap length is sufficient to declare a base match
+            nameBase=list(namesBase)[0]
+            lenBase=max(list(listCntNames.values()))
+        if lenBase<fAnchor:
+            cntBase["_INSUFF_MATCH"]+=1
+            writeBAMwithOpts(
+                    w_fails,pair,[["xx","i",ERROR_CODES["INSUFF_MATCH"]]])
+            continue
 
+        # Extract information about the matched name
+        ivBase=ivBounds[nameBase]
+        sBase=ivBase.strand
 
+        # Identify upstream matches (upstream of the most upstream exon)
+        isUp=False # Set to True if we find an upstream match
+        for seg in pair:
+            if ((sBase=="+" and seg.iv.start<ivBase.start) or \
+                    (sBase=="-" and seg.iv.end>ivBase.end)):
+                isUp=True
+                break
+        if isUp:
+            cntBase["_UPSTREAM_MATCH"]+=1
+            writeBAMwithOpts(
+                    w_fails,pair,
+                    [["xx","i",ERROR_CODES["UPSTREAM_MATCH"]]])
+            continue
 
-                
+        # Identify readthrough (matches downstream of the most downstream exon)
+        for seg in pair:
 
+            # Check if the segment spans downstream of the exons at all
+            if ((sBase=="+" and seg.iv.end<=ivBase.end) or \
+                    (sBase=="-" and seg.iv.start>=ivBase.start)):
+                continue
+            
+            # Construct an interval of length 0, to be included to include
+            # any CIGAR operations that qualify as readthrough
+            if sBase=="+":
+                posBound=ivBase.end
+            elif sBase=="-":
+                posBound=ivBase.start
+            ivRT=ht.GenomicInterval(
+                    ivBase.chrom,posBound,posBound,sBase)
 
+            # Construct a downstream iterator through the CIGAR
+            if seg.iv.strand=="+":
+                itCIGAR=seg.cigar
+            elif seg.iv.strand=="-":
+                itCIGAR=reversed(seg.cigar)
 
+            # Update ivRT to include any readthrough
+            isReading=False # True if we are in readthrough operations
+            for op in itCIGAR:
+                if op in ROPS:
+                    if op not in SOPS:
+                        isReading=True
+                        if ((sBase=="+" and op.ref_iv.end>ivBase.end) or \
+                                (sBase=="-" and op.ref_iv.start<ivBase.start)):
+                            ivRT.extend_to_include(op.ref_iv)
+                    elif isReading: # Encountered a skip, so stop counting
 
+                        # Correct the upstream bound of ivRT
+                        if sBase=="+":
+                            ivRT.start=ivBase.end
+                        elif sBase=="-":
+                            ivRT.end=ivBase.start
+
+                        listLenRT.append(ivRT.length)
+                        break
+        lenRT=max(listLenRT)
+
+        # Increment counters
+        cntBase[nameBase]+=1
+        cntBase["_HITS"]+=1
+        if lenRT>0:
+            cntRT[nameBase]+=1
+            cntRT["_HITS"]+=1
+            dictRT[nameBase].append(lenRT)
+
+        # Write the hit
+        if pathToHits is not None:
+            opts=[["fe","Z",nameBase],["ba","i",lenBase]]
+            if lenRT>0:
+                opts.append(["tl","i",lenRT])
+            writeBAMwithOpts(w_hits,pair,opts)
 
     if pathToHits is not None:
         w_hits.close()
     if pathToFails is not None:
         w_fails.close()
 
+    msg("".join["Finished counting reads. Summary of results:",
+        "Total reads from file: ",str(prog["READS"]),
+        "Total base hits: ",str(cntBase["_HITS"]),
+        "Total readthrough hits: ",str(cntRT["_HITS"]),
+        "Total multi-mapping reads: ",str(cntBase["_MULTI_MAP"]),
+        "Total orphan reads: ",str(cntBase["_ORPHAN"]),
+        "Total reads failing checks: ",str(cntBase["_FAIL_CHECKS"]),
+        "Total reads matching no feature name: ",str(cntBase["_NO_NAME"]),
+        "Total reads matching multiple names: ",str(cntBase["_MULTI_NAME"]),
+        "Total reads with too few matches: ",str(cntBase["_INSUFF_MATCH"]),
+        "Total reads with upstream match: ",str(cntBase["_UPSTREAM_MATCH"])])
+
+    # Need to return objects
+
 def writeBAMwithOpts(writer,pair,opts):
     """
     Writes a pair of BAM alignment with the HTSeq BAM writer, 
     adding optional fields.
-    writer: an HTSeq BAM writer
+    writer: an HTSeq BAM writer. If None, we do nothing.
     pair: an iterable of HTSeq SAM alignments
     opts: a list of optional fields in the format [[TAG,TYPE,VALUE],...]
         The TAG and TYPE elements must be strings. If the VALUE element is
         not a string already, it will be converted to a string.
     """
+
+    if writer is None:
+        return
 
     # Convert optional field VALUE to string if needed
     for i in range(len(opts)):

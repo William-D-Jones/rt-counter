@@ -7,8 +7,6 @@ import _rtcounter as rt
 # Parser defaults
 D_FANCHOR=10
 D_RTANCHOR=10
-D_COUNTMODE=rt._counting.MODE_CNTNON
-COUNTMODES_DISP=" | ".join(rt._counting.COUNTMODES)
 
 # Parse the command line
 paMain=ap.ArgumentParser(description=
@@ -37,16 +35,6 @@ paMain.add_argument("-f","--featureAnchor",type=int,help="Number of bases in \
         reads that must match the 3' end of each feature in the BED file. \
         Defaults to "+str(D_FANCHOR)+".",default=D_FANCHOR,metavar=\
         "NUMBER_OF_BASES")
-paMain.add_argument("-r","--readthroughAnchor",type=int,help="".join(["Number \
-        of bases in reads that must match the genomic sequence immediately 3' \
-        to each feature. Defaults to ",str(D_RTANCHOR),"."]),
-        default=D_RTANCHOR,metavar="NUMBER_OF_BASES")
-paMain.add_argument("-cmm","--countMultimappers",
-        choices=rt._counting.COUNTMODES,
-        help="".join(["Mode for counting reads that have multiple \
-        alignments. Choose from [",COUNTMODES_DISP,"]. ",
-        "Defaults to ",str(D_COUNTMODE),"."]),default=D_COUNTMODE,
-        metavar="MODE_CHOICE")
 paNames=paMain.parse_args()
 
 dfResult=rt._counting._calc_rt(
@@ -54,7 +42,5 @@ dfResult=rt._counting._calc_rt(
         pathToBAM=paNames.BAM,
         pathToHits=paNames.pathToHits,
         pathToFails=paNames.pathToFails,
-        fAnchor=paNames.featureAnchor,
-        rtAnchor=paNames.readthroughAnchor,
-        countMultimappers=paNames.countMultimappers)
+        fAnchor=paNames.featureAnchor)
 
