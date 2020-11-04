@@ -19,9 +19,12 @@ paMain.add_argument("GTF",type=str,help="Path to Ensembl GTF file containing \
 paMain.add_argument("BAM",type=str,help="Path to BAM file containing the \
         aligned reads. BAM alignments must be sorted by read name (QNAME).",
         metavar="PATH_TO_BAM")
-paMain.add_argument("out",type=str,help="Path and filename to which the \
-        output tsv file of counting results will be written.",
-        metavar="PATH_TO_OUTPUT_TSV")
+paMain.add_argument("pathToCounts",type=str,help="Path and filename to which \
+        the output tsv file of counting results will be written.",
+        metavar="PATH_TO_OUTPUT_COUNTS")
+paMain.add_argument("pathToTails",type=str,help="Path and filename to which \
+        the output tsv file of readthrough tail lengths will be written.",
+        metavar="PATH_TO_OUTPUT_TAILS")
 paMain.add_argument("-m","--pathToHits",type=str,help="If present, writes \
         alignments from the BAM file (no headers) to this path and filename \
         if a match is found to a GTF entry, with 3 added optional fields: \
@@ -37,10 +40,18 @@ paMain.add_argument("-f","--featureAnchor",type=int,help="Number of bases in \
         "NUMBER_OF_BASES")
 paNames=paMain.parse_args()
 
-dfResult=rt._counting._calc_rt(
+# Count read pairs
+dfCnt,dictTails=rt._counting._calc_rt(
         pathToGTF=paNames.GTF,
         pathToBAM=paNames.BAM,
         pathToHits=paNames.pathToHits,
         pathToFails=paNames.pathToFails,
         fAnchor=paNames.featureAnchor)
+
+# Write the count dataframe to file
+dfCnt.to_csv(paNames.pathToCounts,sep="\t",quoting=csv.QUOTE_NONE,index=False,
+        mode="w",line_terminator="\n")
+
+# Write the tails dictionary to file
+rt._io._tails2file(dictTails,paNames.pathToTails)
 

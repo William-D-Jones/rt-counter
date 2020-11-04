@@ -1,6 +1,7 @@
 import HTSeq as ht
 import collections as co
 import datetime as dt
+import pandas as pd
 
 # CIGAR data
 MOPS=set(["M","=","X"]) # CIGAR operations interpreted as matches
@@ -15,7 +16,8 @@ ERROR_CODES={
         "NO_NAME":4,
         "MULTI_NAME":5,
         "INSUFF_MATCH":6,
-        "UPSTREAM_MATCH":7}
+        "UPSTREAM_MATCH":7,
+        "DOWNSTREAM_MATCH":8}
 
 def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     """
@@ -31,15 +33,22 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
            overlap any features other than F.
         e. With respect to the direction of transcription of F, no 
            CIGAR match operations in either segment of the template
-           overlap any interval lying immediately upstream of the most 
-           upstream exon of F.
+           overlap any interval lying upstream of the most upstream exon of F.
+        f. With respect to the direction of transcription of F, no 
+           CIGAR match operations in either segment of the template
+           overlap any interval lying downstream of the most upstream exon of 
+           F, unless the template also fulfills condition g.
     2. A template also counts toward the 'readthrough' transcript of F if
        it counts toward F's 'base' transcript and also:
-        d. At least one segment in the template has at least 1 CIGAR
-           match operations that overlaps an interval lying downstream of the 
-           most downstream exon of F.
+        g. At least one segment in the template has at least 1 CIGAR
+           match operation that overlaps an interval lying downstream of the 
+           most downstream exon of F, as long as there no skips between
+           this operation and the more downstream of either: the most 
+           upstream match operation in the segment or a non-skip operation
+           containing the most downstream nucleotide of the most downstream
+           exon in F.
 
-        For every template satisfying criteria a-d, we calculate the
+        For every template satisfying criteria a-g, we calculate the
         'tail length' for each segment:
            The tail length is the length of the interval bounded
            by, but not containing, the most downstream nucleotide of the most 
@@ -94,10 +103,10 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                     ivBounds[feature.name].extend_to_include(feature.iv)
     _msg("".join(["Read ",str(len(ivBounds.keys()))," named sets of exons."]))
 
-    cntBase=co.Counter() # Counter of base transcripts and errors
+    cntStats=co.Counter() # Counter of template statistics
+    cntBase=co.Counter() # Counter of base transcripts
     cntRT=co.Counter() # Counter of readthrough transcripts
-    dictRT=co.defaultdict(list) # Lists of tail lengths for each feature name
-    prog={"READS":0} # Holds progress statistics
+    dictTails=co.defaultdict(list) # Lists of tail lengths for each feature name
     
     aa=ht.SAM_Reader(pathToBAM)
     if pathToHits is not None:
@@ -114,15 +123,15 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
     for bundle in ht.pair_SAM_alignments(aa,bundle=True):
 
         # Progress update
-        prog["READS"]+=1
-        if prog["READS"]>0 and prog["READS"]%10000==0:
-            _msg("".join(["In progress: Counted ",str(prog["READS"]),
-                " reads, ",str(cntBase["_HITS"])," base hits, and ",
-                str(cntRT["_HITS"])," readthrough hits."]))
+        cntStats["TOT_PAIRS"]+=1
+        if cntStats["TOT_PAIRS"]>0 and cntStats["TOT_PAIRS"]%100000==0:
+            _msg("".join(["In progress: Counted ",str(cntStats["TOT_PAIRS"]),
+                " read pairs, ",str(cntStats["TOT_BASE"])," base hits, and ",
+                str(cntStats["TOT_RT"])," readthrough hits."]))
 
         # Reject multimappers
         if len(bundle)>1:
-            cntBase["_MULTI_MAP"]+=1
+            cntStats["MULTI_MAP"]+=1
             for pair in bundle:
                 writeBAMwithOpts(
                     w_fails,pair,[["xx","i",ERROR_CODES["MULTI_MAP"]]])
@@ -132,7 +141,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
 
             # Check that the alignment is paired
             if None in pair:
-                cntBase["_ORPHAN"]+=1
+                cntStats["ORPHAN"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["ORPHAN"]]])
                 continue
@@ -148,7 +157,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                     break
             if failchecks:
                 failchecks=False
-                cntBase["_FAIL_CHECKS"]+=1
+                cntStats["FAIL_CHECKS"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["FAIL_CHECKS"]]])
                 continue
@@ -176,13 +185,13 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                 listCntNames.append(cntNames)
             # Check if any segment overlaps multiple feature names
             if isMultiName or len(namesBase)>1:
-                cntBase["_MULTI_NAME"]+=1
+                cntStats["MULTI_NAME"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["MULTI_NAME"]]])
                 continue
             # Check if any segment overlaps any feature name
             if len(namesBase)==0:
-                cntBase["_NO_NAME"]+=1
+                cntStats["NO_NAME"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["NO_NAME"]]])
                 continue
@@ -193,7 +202,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                 if cntNames[nameBase]>lenBase:
                     lenBase=cntNames[nameBase]
             if lenBase<fAnchor:
-                cntBase["_INSUFF_MATCH"]+=1
+                cntStats["INSUFF_MATCH"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,[["xx","i",ERROR_CODES["INSUFF_MATCH"]]])
                 continue
@@ -210,7 +219,7 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
                     isUp=True
                     break
             if isUp:
-                cntBase["_UPSTREAM_MATCH"]+=1
+                cntStats["UPSTREAM_MATCH"]+=1
                 writeBAMwithOpts(
                         w_fails,pair,
                         [["xx","i",ERROR_CODES["UPSTREAM_MATCH"]]])
@@ -218,57 +227,65 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
 
             # Identify readthrough (downstream of the most downstream exon)
             listLenRT=[0]
+            isDown=False # Set to True if we find a downstream match
             for seg in pair:
 
                 # Check if the segment spans downstream of the exons at all
                 if ((sBase=="+" and seg.iv.end<=ivBase.end) or \
                         (sBase=="-" and seg.iv.start>=ivBase.start)):
                     continue
+
+                isDown=True
                 
                 # Construct an interval of length 0, to be included to include
                 # any CIGAR operations that qualify as readthrough
                 if sBase=="+":
-                    posBound=ivBase.end
+                    posBoundOut=ivBase.end
                 elif sBase=="-":
-                    posBound=ivBase.start
+                    posBoundOut=ivBase.start
                 ivRT=ht.GenomicInterval(
-                        ivBase.chrom,posBound,posBound,".")
+                        ivBase.chrom,posBoundOut,posBoundOut,".")
 
                 # Construct a downstream iterator through the CIGAR
-                if seg.iv.strand=="+":
+                if sBase=="+":
                     itCIGAR=seg.cigar
-                elif seg.iv.strand=="-":
+                elif sBase=="-":
                     itCIGAR=reversed(seg.cigar)
 
                 # Update ivRT to include any readthrough
                 isReading=False # True if we are in readthrough operations
                 for op in itCIGAR:
                     if op.type in ROPS:
-                        if op.type not in SOPS:
-                            if ((sBase=="+" and op.ref_iv.end>ivBase.end) or \
-                                    (sBase=="-" and \
-                                    op.ref_iv.start<ivBase.start)):
-                                isReading=True
+                        if ((sBase=="+" and op.ref_iv.end>ivBase.end) or \
+                                (sBase=="-" and op.ref_iv.start<ivBase.start)):
+                            isReading=True
+                            if op.type not in SOPS:
                                 ivRT.extend_to_include(op.ref_iv)
-                        elif isReading: # Encountered a skip, so stop counting
-
+                        if (isReading and (op.type in SOPS)): # Stop counting
                             # Correct the upstream bound of ivRT
                             if sBase=="+":
                                 ivRT.start=ivBase.end
                             elif sBase=="-":
                                 ivRT.end=ivBase.start
-
                             listLenRT.append(ivRT.length)
                             break
             lenRT=max(listLenRT)
 
+            # Check if we have a downstream match but not a readthrough hit
+            if isDown and lenRT==0:
+                cntStats["DOWNSTREAM_MATCH"]+=1
+                writeBAMwithOpts(
+                        w_fails,pair,
+                        [["xx","i",ERROR_CODES["DOWNSTREAM_MATCH"]]])
+                continue
+
             # Increment counters
             cntBase[nameBase]+=1
-            cntBase["_HITS"]+=1
+            cntStats["TOT_BASE"]+=1
             if lenRT>0:
                 cntRT[nameBase]+=1
-                cntRT["_HITS"]+=1
-                dictRT[nameBase].append(lenRT)
+                cntStats["TOT_RT"]+=1
+                dictTails[nameBase].append(lenRT)
 
             # Write the hit
             if pathToHits is not None:
@@ -283,21 +300,32 @@ def _calc_rt(pathToGTF,pathToBAM,pathToHits,pathToFails,fAnchor):
         w_fails.close()
 
     _msg("".join(["Finished counting reads.","\n\t","Summary of results:",
-        "\n\t","Total reads from file: ",str(prog["READS"]),"\n\t",
-        "Total base hits: ",str(cntBase["_HITS"]),"\n\t",
-        "Total readthrough hits: ",str(cntRT["_HITS"]),"\n\t",
-        "Total multi-mapping reads: ",str(cntBase["_MULTI_MAP"]),"\n\t",
-        "Total orphan reads: ",str(cntBase["_ORPHAN"]),"\n\t",
-        "Total reads failing checks: ",str(cntBase["_FAIL_CHECKS"]),"\n\t",
-        "Total reads matching no feature name: ",str(cntBase["_NO_NAME"]),
+        "\n\t","Total reads from file: ",str(cntStats["TOT_PAIRS"]),"\n\t",
+        "Total base hits: ",str(cntStats["TOT_BASE"]),"\n\t",
+        "Total readthrough hits: ",str(cntStats["TOT_RT"]),"\n\t",
+        "Total multi-mapping reads: ",str(cntStats["MULTI_MAP"]),"\n\t",
+        "Total orphan reads: ",str(cntStats["ORPHAN"]),"\n\t",
+        "Total reads failing checks: ",str(cntStats["FAIL_CHECKS"]),"\n\t",
+        "Total reads matching no feature name: ",str(cntStats["NO_NAME"]),
         "\n\t",
-        "Total reads matching multiple names: ",str(cntBase["_MULTI_NAME"]),
+        "Total reads matching multiple names: ",str(cntStats["MULTI_NAME"]),
         "\n\t",
-        "Total reads with too few matches: ",str(cntBase["_INSUFF_MATCH"]),
+        "Total reads with too few matches: ",str(cntStats["INSUFF_MATCH"]),
         "\n\t",
-        "Total reads with upstream match: ",str(cntBase["_UPSTREAM_MATCH"])]))
+        "Total reads with upstream match: ",str(cntStats["UPSTREAM_MATCH"]),
+        "\n\t",
+        "Total reads with downstream match but failing readthrough: ",
+        str(cntStats["DOWNSTREAM_MATCH"])]))
 
-    # Need to return objects
+    # Add zeros to cntRT dictionary to prepare for dataframe
+    for key in cntBase.keys():
+        if key not in cntRT.keys():
+            cntRT[key]=0
+    ids={key:key for key in cntBase.keys()}
+    # Construct dataframe
+    dfCnt=pd.DataFrame(
+            {"id":ids,"count_base":cntBase,"count_readthrough":cntRT})
+    return dfCnt,dictTails
 
 def _msg(message):
     """
