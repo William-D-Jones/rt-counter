@@ -34,6 +34,10 @@ paMain.add_argument("-x","--pathToFails",type=str,help="If present, writes \
         alignments from the BAM file (no headers) to this path and filename \
         if the alignment is not counted toward any GTF entry, with 1 added \
         option field: xx:i:ERROR_CODE",default=None,metavar="PATH_TO_FAILS")
+paMain.add_argument("-f","--featureAnchor",type=int,help="Number of bases in \
+        reads that must match the 3' end of each feature in the BED file. \
+        Defaults to "+str(D_FANCHOR)+".",default=D_FANCHOR,metavar=\
+        "NUMBER_OF_BASES")
 paNames=paMain.parse_args()
 
 # Count read pairs
