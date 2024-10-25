@@ -13,7 +13,7 @@ either 'base' reads--any read that maps a gene--or 'readthrough' reads--base
 reads that also extend past the 3' end of a gene and into the surrounding
 genomic DNA.
 
-# Detailed Read Counting Procedure
+## Detailed Read Counting Procedure:
 
     Counts paired-end reads from a BAM file using the following procedure:
     1. A template counts toward the 'base' transcript of a feature F if:
